@@ -21,11 +21,6 @@ object Main {
                         sa.getErrors().map(e =>  println(e))
                         sys.exit(200)
                     } else {
-                        val intermediateTranslator = new AbstractTranslator()
-                        val finalTranslator = new AssemblyTranslator()
-                        val intermediateTranslation = intermediateTranslator.translate(x)
-                        val (assembly, inbuilts, funcs, stringLabelMap) = finalTranslator.translate(intermediateTranslation)
-                        buildAssembly(assembly, args.head, inbuilts.toSet, funcs, stringLabelMap.toMap)
                         sys.exit(0)
                     }
                 }

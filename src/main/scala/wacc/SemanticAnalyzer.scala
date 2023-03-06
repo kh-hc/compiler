@@ -67,9 +67,11 @@ class SemanticAnalyzer(file: String) {
         statement match {
             case SkipStat => ()
             case AssignStat(t, id, value) => {
+                // Set the type of the AST node
+                val expectedType = translate(t)
+                statement.tiepe = Some(expectedType)
                 // Check that we are not trying to assign to something that already exists
                 if (symbolTable.lookup(id.id).isEmpty) {
-                    val expectedType = translate(t)
                     val providedType = checkRvalue(value, symbolTable)
                     if (expectedType != providedType) {
                         // If the type of the right value provided is unexpected, this could be due to ambiguous typing rules with pairs and arrays:
@@ -135,6 +137,7 @@ class SemanticAnalyzer(file: String) {
             case ReassignStat(left, right) => {
                 val leftType = checkLvalue(left, symbolTable)
                 val rightType = checkRvalue(right, symbolTable)
+                statement.tiepe = Some(leftType)
                 // If the types are not equal, we may be dealing with the ambiguous typing rules with pairs/arrays
                 if (leftType != rightType) {
                     leftType match {
@@ -165,22 +168,32 @@ class SemanticAnalyzer(file: String) {
             }
             case r: ReadStat => checkLvalue(r.value, symbolTable) match {
                 // We can only read ints or chars
-                case IntSymbol => r.readType = Option(checkLvalue(r.value, symbolTable))
-                case CharSymbol => r.readType = Option(checkLvalue(r.value, symbolTable))
+                case IntSymbol => r.tiepe = Some(checkLvalue(r.value, symbolTable))
+                case CharSymbol => r.tiepe = Some(checkLvalue(r.value, symbolTable))
                 case default => errorStack += readError.err(r.value, default)(file) 
             }
-            case FreeStat(expr) => checkExpression(expr, symbolTable) match {
-                // Makes sure that we are only freeing pairs or arrays
-                case ArraySymbol(_) => ()
-                case NestedPairSymbol => ()
-                case PairLiteralSymbol => ()
-                case TopPairSymbol(_, _) => ()
-                case default => errorStack += freeError.err(expr, default)(file)
+            case FreeStat(expr) => {
+                    val freeType = checkExpression(expr, symbolTable)
+                    statement.tiepe = Some(freeType)
+                    freeType match {
+                    // Makes sure that we are only freeing pairs or arrays
+                    case ArraySymbol(_) => ()
+                    case NestedPairSymbol => ()
+                    case PairLiteralSymbol => ()
+                    case TopPairSymbol(_, _) => ()
+                    case default => errorStack += freeError.err(expr, default)(file)
+                }
             }
-            case ReturnStat(expr) => checkEvaluatesTo(expr, symbolTable, returnType)
-            case ExitStat(expr) => checkEvaluatesTo(expr, symbolTable, IntSymbol)
-            case p: PrintStat => p.printType = Option(checkExpression(p.expr, symbolTable))
-            case p: PrintlnStat => p.printType = Option(checkExpression(p.expr, symbolTable))
+            case ReturnStat(expr) => {
+                statement.tiepe = Some(returnType)
+                checkEvaluatesTo(expr, symbolTable, returnType)
+            }
+            case ExitStat(expr) => {
+                statement.tiepe = Some(IntSymbol)
+                checkEvaluatesTo(expr, symbolTable, IntSymbol)
+            }
+            case p: PrintStat => statement.tiepe = Some(checkExpression(p.expr, symbolTable))
+            case p: PrintlnStat => statement.tiepe = Some(checkExpression(p.expr, symbolTable))
             case IfStat(cond, ifStat, elseStat) => {
                 checkEvaluatesTo(cond, symbolTable, BoolSymbol)
                 val ifSymbols = new SymbolTable(Some(symbolTable))
@@ -203,59 +216,77 @@ class SemanticAnalyzer(file: String) {
         }
     }
 
-    def checkEvaluatesTo(expr: Expr, symbolTable: SymbolTable, t: SymbolType): Unit = t match {
-        // We only try evaluting to NoReturn if we are trying to return from the body of the code
-        case NoReturn => errorStack += returnError.err(expr)(file)
-        // Nested pairs can match with anything
-        case NestedPairSymbol => return ()
-        case TopPairSymbol(x, y) => {
-            val exprType = checkExpression(expr, symbolTable)
-            if (exprType != t) {
-                exprType match {
-                    case NestedPairSymbol => return ()
-                    case PairLiteralSymbol => return ()
-                    case _ => errorStack += unexpectedTypeExpr.err(expr, exprType, t)(file)
-                }
-            }
-        }
-        case symbolType => {
-            val exprType = checkExpression(expr, symbolTable)
-            // If the expected type does not match the actual type, check that the evalution does not lead to an ambiguous type
-            if (exprType != symbolType) {
-                if (exprType == NestedPairSymbol) {
-                    return ()
-                }
-                if (symbolType == ArraySymbol(AmbiguousSymbol)) {
-                    exprType match{
-                        case ArraySymbol(subtype) => return ()
-                        case _ => errorStack += unexpectedTypeExpr.err(expr, exprType, symbolType)(file) 
-                    }
-                } else if (symbolType == PairLiteralSymbol) {
+    def checkEvaluatesTo(expr: Expr, symbolTable: SymbolTable, t: SymbolType): Unit = {
+        expr.tiepe = Some(t)
+        t match {
+            // We only try evaluting to NoReturn if we are trying to return from the body of the code
+            case NoReturn => errorStack += returnError.err(expr)(file)
+            // Nested pairs can match with anything
+            case NestedPairSymbol => return ()
+            case TopPairSymbol(x, y) => {
+                val exprType = checkExpression(expr, symbolTable)
+                if (exprType != t) {
                     exprType match {
-                        case TopPairSymbol(x, y) =>
-                        case _ => errorStack += unexpectedTypeExpr.err(expr, exprType, symbolType)(file) 
+                        case NestedPairSymbol => return ()
+                        case PairLiteralSymbol => return ()
+                        case _ => errorStack += unexpectedTypeExpr.err(expr, exprType, t)(file)
                     }
-                } 
-                else {
-                    errorStack += unexpectedTypeExpr.err(expr, exprType, symbolType)(file) 
                 }
             }
-            return ()
+            case symbolType => {
+                val exprType = checkExpression(expr, symbolTable)
+                // If the expected type does not match the actual type, check that the evalution does not lead to an ambiguous type
+                if (exprType != symbolType) {
+                    if (exprType == NestedPairSymbol) {
+                        return ()
+                    }
+                    if (symbolType == ArraySymbol(AmbiguousSymbol)) {
+                        exprType match{
+                            case ArraySymbol(subtype) => return ()
+                            case _ => errorStack += unexpectedTypeExpr.err(expr, exprType, symbolType)(file) 
+                        }
+                    } else if (symbolType == PairLiteralSymbol) {
+                        exprType match {
+                            case TopPairSymbol(x, y) =>
+                            case _ => errorStack += unexpectedTypeExpr.err(expr, exprType, symbolType)(file) 
+                        }
+                    } 
+                    else {
+                        errorStack += unexpectedTypeExpr.err(expr, exprType, symbolType)(file) 
+                    }
+                }
+                return ()
+            }
         }
     }
 
     def checkExpression(expr: Expr, st: SymbolTable): SymbolType = expr match {
-        case IntExpr(_) => return IntSymbol
-        case BoolExpr(_) => return BoolSymbol
-        case CharExpr(_) => return CharSymbol
-        case StrExpr(_) => return StringSymbol
+        case IntExpr(_) => {
+            expr.tiepe = Some(IntSymbol)
+            IntSymbol
+        }
+        case BoolExpr(_) => {
+            expr.tiepe = Some(BoolSymbol)
+            BoolSymbol
+        }
+        case CharExpr(_) => {
+            expr.tiepe = Some(CharSymbol)
+            CharSymbol
+        }
+        case StrExpr(_) => {
+            expr.tiepe = Some(StringSymbol)
+            StringSymbol
+        }
         case Identifier(id) => st.lookupRecursive(id) match {
             // If we can't find the identifer, log an error but then continue the analysis with an amibiguous symbol
             case None => {
                 errorStack += undefinedVar.err(expr.asInstanceOf[Identifier])(file) 
-                return AmbiguousSymbol
+                AmbiguousSymbol
             }
-            case Some(value) => return value
+            case Some(value) => {
+                expr.tiepe = Some(value)
+                value
+            }
         }
         case ArrayElem(id, positions) => {
             val arrayType: SymbolType = st.lookupRecursive(id.id) match {
@@ -265,159 +296,233 @@ class SemanticAnalyzer(file: String) {
                     return AmbiguousSymbol
                 }
             }
+            expr.tiepe = Some(arrayType)
             positions.map(p => checkEvaluatesTo(p, st, IntSymbol))
             // Makes sure that the array types match fully, and logs an error if not
             try {
-                return derefType(arrayType, positions.length)
+                derefType(arrayType, positions.length)
             } catch {
                 case e: Exception => {
                     errorStack += derefErrE.err(expr)(file) 
-                    return AmbiguousSymbol
+                    AmbiguousSymbol
                 }
             }
         }
-        case ParenExpr(e) => checkExpression(e, st)
+        case ParenExpr(e) => {
+            val ex = checkExpression(e, st)
+            expr.tiepe = Some(ex)
+            ex
+        }
         case ChrOp(e) => {
             checkEvaluatesTo(e, st, IntSymbol)
-            return CharSymbol
+            expr.tiepe = Some(CharSymbol)
+            CharSymbol
         }
         case LenOp(e)  => {
             checkEvaluatesTo(e, st, ArraySymbol(AmbiguousSymbol))
-            return IntSymbol
+            expr.tiepe = Some(IntSymbol)
+            IntSymbol
         }
         case NegateOp(e)  => {
             checkEvaluatesTo(e, st, IntSymbol)
-            return IntSymbol
+            expr.tiepe = Some(IntSymbol)
+            IntSymbol
         }
         case NotOp(e)  => {
             checkEvaluatesTo(e, st, BoolSymbol)
-            return BoolSymbol
+            expr.tiepe = Some(BoolSymbol)
+            BoolSymbol
         }
         case OrdOp(e)  => {
             checkEvaluatesTo(e, st, CharSymbol)
-            return IntSymbol
+            expr.tiepe = Some(IntSymbol)
+            IntSymbol
         }
-        case Div(left, right) => checkMathExpr(left, right, st)
-        case Mod(left, right) => checkMathExpr(left, right, st)
-        case Mul(left, right) => checkMathExpr(left, right, st)
-        case Add(left, right) => checkMathExpr(left, right, st)
-        case Sub(left, right) => checkMathExpr(left, right, st)
-        case GreaterThan(left, right) => checkOrderExpr(left, right, st)
-        case GreaterOrEqualThan(left, right) => checkOrderExpr(left, right, st)
-        case LessThan(left, right) => checkOrderExpr(left, right, st)
-        case LessOrEqualThan(left, right) => checkOrderExpr(left, right, st)
-        case Equal(left, right) => {
-            checkEqualExpr(left, right, st)
-            return BoolSymbol
-        }
-        case NotEqual(left, right) => {
-            checkEqualExpr(left, right, st)
-            return BoolSymbol
-        }
-        case And(left, right) => checkBoolExpr(left, right, st)
-        case Or(left, right) => checkBoolExpr(left, right, st)
-        case PairLiteral => return PairLiteralSymbol
+        case m: MathExpr => checkMathExpr(m, st)
+        case c: CmpExpr => checkOrderExpr(c, st)
+        case e: EqExpr => checkEqualExpr(e, st)
+        case l: LogicExpr => checkBoolExpr(l, st)
+        case PairLiteral => PairLiteralSymbol
     }
 
-    def checkEqualExpr(exprL: Expr, exprR: Expr, st: SymbolTable): SymbolType = {
+    def checkEqualExpr(e: EqExpr, st: SymbolTable): SymbolType = {
         // Checks that the types on either side of a binary expression are the same
-        val exprType = checkExpression(exprL, st)
-        checkEvaluatesTo(exprR, st, exprType)
-        return exprType
+        var left: Option[Expr] = None
+        var right: Option[Expr] = None
+        e match {
+            case Equal(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case NotEqual(l, r)  => {
+                left = Some(l)
+                right = Some(r)
+            }
+        }
+        val exprType = checkExpression(left.get, st)
+        checkEvaluatesTo(right.get, st, exprType)
+        BoolSymbol
     }
 
-    def checkOrderExpr(exprL: Expr, exprR: Expr, st: SymbolTable): SymbolType = {
+    def checkOrderExpr(e: CmpExpr, st: SymbolTable): SymbolType = {
         // Checks that the types on either side of a binary expression could be ints or chars
-        val t = checkEqualExpr(exprL, exprR, st)
-        if (!(t == IntSymbol || t == CharSymbol)) {
-            errorStack += unexpectedTypeExpr.err(exprL, t, IntSymbol)(file) 
+        var left: Option[Expr] = None
+        var right: Option[Expr] = None
+        e match {
+            case GreaterOrEqualThan(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case GreaterThan(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case LessOrEqualThan(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case LessThan(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
         }
-        return BoolSymbol
+        val exprType = checkExpression(left.get, st)
+        checkEvaluatesTo(right.get, st, exprType)
+        if (!(exprType == IntSymbol || exprType == CharSymbol)) {
+            errorStack += unexpectedTypeExpr.err(left.get, exprType, IntSymbol)(file) 
+        }
+        BoolSymbol
     }
 
-    def checkMathExpr(exprL: Expr, exprR: Expr, st: SymbolTable): SymbolType = {
+    def checkMathExpr(e: MathExpr, st: SymbolTable): SymbolType = {
+        var left: Option[Expr] = None
+        var right: Option[Expr] = None
+        e match {
+            case Mul(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case Add(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case Sub(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case Div(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case Mod(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+        }
+        e.tiepe = Some(IntSymbol)
         // Checks that both expressions could evaluate to ints
-        checkEvaluatesTo(exprL, st, IntSymbol)
-        checkEvaluatesTo(exprR, st, IntSymbol)
-        return IntSymbol
+        checkEvaluatesTo(left.get, st, IntSymbol)
+        checkEvaluatesTo(right.get, st, IntSymbol)
+        IntSymbol
     }
 
-    def checkBoolExpr(exprL: Expr, exprR: Expr, st: SymbolTable): SymbolType = {
+    def checkBoolExpr(e: LogicExpr, st: SymbolTable): SymbolType = {
         // Checks that both expressions could evalute to chars
-        checkEvaluatesTo(exprL, st, BoolSymbol)
-        checkEvaluatesTo(exprR, st, BoolSymbol)
-        return BoolSymbol
-    }
-
-    def checkLvalue(lValue: Lvalue, st: SymbolTable): SymbolType = lValue match {
-        case PairElemFst(pair) => checkLvalue(pair, st) match {
-            case TopPairSymbol(fst, snd) => return fst
-            case PairLiteralSymbol => return NestedPairSymbol
-            case NestedPairSymbol => return NestedPairSymbol
-            case default => {
-                errorStack += derefErr.err(lValue, default)(file) 
-                return NestedPairSymbol
+        var left: Option[Expr] = None
+        var right: Option[Expr] = None
+        e match {
+            case And(l, r) => {
+                left = Some(l)
+                right = Some(r)
+            }
+            case Or(l, r) => {
+                left = Some(l)
+                right = Some(r)
             }
         }
-        case PairElemSnd(pair) => checkLvalue(pair, st) match {
-            case TopPairSymbol(fst, snd) => return snd
-            case PairLiteralSymbol => return NestedPairSymbol
-            case NestedPairSymbol => return NestedPairSymbol
-            case default => {
-                errorStack += derefErr.err(lValue, default)(file) 
-                return NestedPairSymbol
-            }
-        }
-        // All l-values types that are not pair elems are encompassed in the evalution of expressions, so we can use the same checker
-        case expr => return checkExpression(expr.asInstanceOf[Expr], st)
+        e.tiepe = Some(BoolSymbol)
+        checkEvaluatesTo(left.get, st, BoolSymbol)
+        checkEvaluatesTo(right.get, st, BoolSymbol)
+        BoolSymbol
     }
 
-    def checkRvalue(value: Rvalue, st: SymbolTable): SymbolType = value match {
-        case ArrayLiteral(contents) => {
-            val arrayTypes: List[SymbolType] = contents.map(e => checkExpression(e, st))
-            // Ensures that every element in the array is of the same type, and returns that type
-            if (arrayTypes.length > 0) {
-                if (arrayTypes.distinct.length == 1) {
-                    return ArraySymbol(arrayTypes.head)
+    def checkLvalue(lValue: Lvalue, st: SymbolTable): SymbolType = {
+        val symbolType = lValue match {
+            case PairElemFst(pair) => checkLvalue(pair, st) match {
+                case TopPairSymbol(fst, snd) => return fst
+                case PairLiteralSymbol => return NestedPairSymbol
+                case NestedPairSymbol => return NestedPairSymbol
+                case default => {
+                    errorStack += derefErr.err(lValue, default)(file) 
+                    NestedPairSymbol
+                }
+            }
+            case PairElemSnd(pair) => checkLvalue(pair, st) match {
+                case TopPairSymbol(fst, snd) => return snd
+                case PairLiteralSymbol => return NestedPairSymbol
+                case NestedPairSymbol => return NestedPairSymbol
+                case default => {
+                    errorStack += derefErr.err(lValue, default)(file) 
+                    NestedPairSymbol
+                }
+            }
+            // All l-values types that are not pair elems are encompassed in the evalution of expressions, so we can use the same checker
+            case expr: Expr => return checkExpression(expr, st)
+        }
+        lValue.tiepe = Some(symbolType)
+        symbolType
+    }
+
+    def checkRvalue(value: Rvalue, st: SymbolTable): SymbolType = {
+        val symbolType = value match {
+            case ArrayLiteral(contents) => {
+                val arrayTypes: List[SymbolType] = contents.map(e => checkExpression(e, st))
+                // Ensures that every element in the array is of the same type, and returns that type
+                if (arrayTypes.length > 0) {
+                    if (arrayTypes.distinct.length == 1) {
+                        ArraySymbol(arrayTypes.head)
+                    } else {
+                        errorStack += arrayTypeErr.err(value, arrayTypes.head)(file) 
+                        ArraySymbol(AmbiguousSymbol)
+                    }            
                 } else {
-                    errorStack += arrayTypeErr.err(value, arrayTypes.head)(file) 
-                    return ArraySymbol(AmbiguousSymbol)
-                }            
-            } else {
-                return ArraySymbol(AmbiguousSymbol)
+                    ArraySymbol(AmbiguousSymbol)
+                }
             }
-        }
-        case NewPair(left, right) => {
-            val symbolLeft = checkExpression(left, st)
-            val symbolRight = checkExpression(right, st)
-            // Ensures that the pair type nesting heirachy is preserved when new pairs are created
-            TopPairSymbol(symbolLeft match {
-                case TopPairSymbol(ft, st) => PairLiteralSymbol
-                case PairLiteralSymbol => NestedPairSymbol
-                case NestedPairSymbol => NestedPairSymbol
-                case default => default
-            }, symbolRight match {
-                case TopPairSymbol(ft, st) => PairLiteralSymbol
-                case NestedPairSymbol => NestedPairSymbol
-                case PairLiteralSymbol => NestedPairSymbol
-                case default => default
-            })
-        }
-        case Call(id, args) => st.lookupFunctionRecursive(id.id) match {
-            // Check that the function exists and the argument types match
-            case Some(FunctionSymbol(returnT, argsT)) => {
-                matchArgs(argsT, args.args, st, id)
-                return returnT
+            case NewPair(left, right) => {
+                val symbolLeft = checkExpression(left, st)
+                val symbolRight = checkExpression(right, st)
+                // Ensures that the pair type nesting heirachy is preserved when new pairs are created
+                TopPairSymbol(symbolLeft match {
+                    case TopPairSymbol(ft, st) => PairLiteralSymbol
+                    case PairLiteralSymbol => NestedPairSymbol
+                    case NestedPairSymbol => NestedPairSymbol
+                    case default => default
+                }, symbolRight match {
+                    case TopPairSymbol(ft, st) => PairLiteralSymbol
+                    case NestedPairSymbol => NestedPairSymbol
+                    case PairLiteralSymbol => NestedPairSymbol
+                    case default => default
+                })
             }
-            case _ => {
-                errorStack += undefFunc.err(id)(file) 
-                return AmbiguousSymbol
+            case Call(id, args) => st.lookupFunctionRecursive(id.id) match {
+                // Check that the function exists and the argument types match
+                case Some(FunctionSymbol(returnT, argsT)) => {
+                    matchArgs(argsT, args.args, st, id)
+                    returnT
+                }
+                case _ => {
+                    errorStack += undefFunc.err(id)(file) 
+                    AmbiguousSymbol
+                }
             }
+            // Reduce code duplication by letting l-value and expression evalute the rest of the r-values (they evaluate in the same way)
+            case PairElemFst(pair) => checkLvalue(value.asInstanceOf[Lvalue], st)
+            case PairElemSnd(pair) => checkLvalue(value.asInstanceOf[Lvalue], st)
+            case expr => checkExpression(expr.asInstanceOf[Expr], st)
         }
-        // Reduce code duplication by letting l-value and expression evalute the rest of the r-values (they evaluate in the same way)
-        case PairElemFst(pair) => checkLvalue(value.asInstanceOf[Lvalue], st)
-        case PairElemSnd(pair) => checkLvalue(value.asInstanceOf[Lvalue], st)
-        case expr => checkExpression(expr.asInstanceOf[Expr], st)
+    value.tiepe = Some(symbolType)
+    symbolType
     }
 
     def matchArgs(expected: List[SymbolType], provided: List[Expr], st: SymbolTable, id: Identifier) = {
@@ -428,5 +533,4 @@ class SemanticAnalyzer(file: String) {
             expected.lazyZip(provided).map((ex, pr) => checkEvaluatesTo(pr, st, ex))            
         }
     }
-
 }
